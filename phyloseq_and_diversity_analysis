@@ -1,0 +1,131 @@
+R
+library(phyloseq)
+library(Biostrings)
+library(ggplot2)
+library(vegan)
+library(pairwiseAdonis)
+
+
+# Load DADA2 results
+load("R_enviroment_with_dada2_results")
+
+# Load metadata
+samdf <- read.csv(
+  "/path_to_metadata/metadata_dada2.tsv",
+  sep = "\t",
+  row.names = "sample.id"
+)
+
+# Ensure sample name consistency
+rownames(seqtab.nochim) <- sample.names
+all(rownames(samdf) %in% rownames(seqtab.nochim))
+
+# Build phyloseq object
+ps <- phyloseq(
+  otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+  sample_data(samdf),
+  tax_table(taxa)
+)
+
+# Add DNA sequences to phyloseq object
+dna <- DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+
+# Rename ASVs
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+
+# Inspect sequencing depth
+sample_sums(ps)
+
+# Evaluate rarefaction thresholds
+cutoffs <- c(93000, 95000, 97000, 100000)
+sapply(cutoffs, function(x) sum(sample_sums(ps) >= x))
+
+# Rarefaction curves
+otu <- as.data.frame(otu_table(ps))
+rarecurve(otu, step = 100)
+
+# Rarefy to even sequencing depth
+ps_rare <- rarefy_even_depth(
+  ps,
+  rngseed = 1170,
+  sample.size = 93000,
+  replace = FALSE,
+  verbose = TRUE
+)
+
+# Alpha diversity visualization
+plot_richness(
+  ps_rare,
+  x = "group",
+  measures = c("Shannon", "Simpson")
+) + geom_boxplot()
+
+# Alpha diversity estimates
+rich <- estimate_richness(ps_rare, measures = c("Shannon", "Simpson"))
+
+# Pairwise comparisons for alpha diversity 
+pairwise.wilcox.test(rich$Shannon, sample_data(ps_rare)$group)
+pairwise.wilcox.test(rich$Simpson, sample_data(ps_rare)$group)
+
+# Beta diversity: Bray–Curtis PCoA
+ord.pcoa.bray <- ordinate(ps_rare, method = "PCoA", distance = "bray")
+
+df_plot <- as.data.frame(ord.pcoa.bray$vectors[, 1:2])
+colnames(df_plot) <- c("Axis.1", "Axis.2")
+df_plot$group <- as.character(sample_data(ps_rare)$group)
+
+# Variance explained
+var_exp <- ord.pcoa.bray$values$Relative_eig
+pc1 <- round(var_exp[1] * 100, 1)
+pc2 <- round(var_exp[2] * 100, 1)
+
+# PCoA plot
+pcoa_plot <- ggplot(df_plot, aes(x = Axis.1, y = Axis.2, fill = group)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray", alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray", alpha = 0.6) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.8) +
+  theme_bw() +
+  labs(
+    title = "PCoA (Bray–Curtis)",
+    x = paste0("PCoA1 (", pc1, "%)"),
+    y = paste0("PCoA2 (", pc2, "%)"),
+    fill = "Group"
+  ) +
+  theme(
+    legend.position = c(1, 1),
+    legend.justification = c("right", "top"),
+    legend.background = element_rect(fill = "white", color = "black", linewidth = 0.1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave("pcoa_bray_beta_diversity.png", pcoa_plot, width = 8, height = 6, dpi = 300)
+
+# Beta diversity statistics (PERMANOVA)
+dist.bray <- phyloseq::distance(ps_rare, method = "bray")
+
+meta <- read.table(
+  "/path_to_metadata/metadata_dada2.tsv",
+  header = TRUE,
+  sep = "\t",
+  row.names = 1,
+  stringsAsFactors = FALSE
+)
+
+all(sample_names(ps_rare) %in% rownames(meta))
+
+adonis2(dist.bray ~ group, data = meta, permutations = 9999)
+
+# Test homogeneity of group dispersions
+bd <- betadisper(dist.bray, meta$group)
+anova(bd)
+
+# Pairwise PERMANOVA for beta diversity
+pairwise.adonis(
+  dist.bray,
+  factors = meta$group,
+  perm = 9999,
+  p.adjust.m = "BH"
+)
