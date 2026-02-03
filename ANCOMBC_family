@@ -1,0 +1,121 @@
+
+# Differential abundance analysis using ANCOM-BC
+# Taxonomic level: Family
+
+R
+library(ANCOMBC)
+library(phyloseq)
+library(writexl)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+#load environment containing variables from dada2 and phyloseq 
+load("R_environment_with_dada2_results.RData")
+
+# Run ANCOM-BC
+out <- ancombc(
+  data = ps,
+  tax_level = "Family",
+  formula = "group",
+  group = "group"
+)
+
+res <- out$res
+
+# Export ANCOM-BC results
+tab_lfc <- res$lfc
+col_name <- c("Taxon", "Intercept", "KO_Il1a", "KO_Il1aR")
+colnames(tab_lfc) <- col_name
+write_xlsx(tab_lfc, "Resultados_ANCOM_LFC.xlsx")
+
+tab_se <- res$se
+colnames(tab_se) <- col_name
+write_xlsx(tab_se, "Resultados_ANCOM_SE.xlsx")
+
+tab_w <- res$W
+colnames(tab_w) <- col_name
+write_xlsx(tab_w, "Resultados_ANCOM_w_Test_Statistics.xlsx")
+
+tab_p <- res$p_val
+colnames(tab_p) <- col_name
+write_xlsx(tab_p, "Resultados_ANCOM_p_values.xlsx")
+
+tab_q <- res$q
+colnames(tab_q) <- col_name
+write_xlsx(tab_q, "Resultados_ANCOM_q_values.xlsx")
+
+tab_diff <- res$diff_abn
+colnames(tab_diff) <- col_name
+write_xlsx(tab_diff, "Resultados_ANCOM_diff_tax.xlsx")
+
+# Horizontal barplot of log fold change (IL-1α KO vs Control)
+
+# Prepare data
+df_lfc <- as.data.frame(out$res$lfc)
+df_se  <- as.data.frame(out$res$se)
+df_sig <- as.data.frame(out$res$diff_abn)
+
+# Merge results and filter significant taxa
+df_fig_il1a <- df_lfc %>%
+  select(taxon, lfc_val = `groupknockout-IL1a`) %>%
+  inner_join(df_se %>% select(taxon, se_val = `groupknockout-IL1a`), by = "taxon") %>%
+  inner_join(df_sig %>% select(taxon, is_sig = `groupknockout-IL1a`), by = "taxon") %>%
+  filter(is_sig == TRUE & lfc_val != 0)
+
+# Extract family names and apply manual taxonomic annotation
+df_fig_il1a <- df_fig_il1a %>%
+  mutate(
+    Family = str_remove(taxon, "Family:"),
+    Family = str_trim(Family)
+  ) %>%
+  # Exclude selected taxa based on biological relevance
+  filter(!str_detect(Family, "(?i)Firmicutes|Coriobacteriales")) %>%
+  # Manual phylum assignment (phylum not provided by ANCOM-BC output)
+  mutate(Phylum = case_when(
+    Family %in% c("Peptococcaceae", "Ruminococcaceae", "Lachnospiraceae",
+                  "Oscillospiraceae", "Christensenellaceae", "Staphylococcaceae",
+                  "Acholeplasmataceae") ~ "Firmicutes",
+    Family %in% c("Tannerellaceae", "Rikenellaceae", "Prevotellaceae") ~ "Bacteroidetes",
+    Family %in% c("Helicobacteraceae", "Sutterellaceae") ~ "Proteobacteria",
+    Family %in% c("Atopobiaceae", "Bifidobacteriaceae") ~ "Actinobacteria",
+    Family == "Saccharimonadaceae" ~ "Patescibacteria",
+    TRUE ~ "Unclassified"
+  )) %>%
+  arrange(lfc_val)
+
+# Plot significant taxa
+if (nrow(df_fig_il1a) > 0) {
+
+  df_fig_il1a$Family <- factor(df_fig_il1a$Family, levels = df_fig_il1a$Family)
+
+  p <- ggplot(df_fig_il1a, aes(x = Family, y = lfc_val, fill = Phylum)) +
+    geom_bar(stat = "identity", color = "black", width = 0.7, size = 0.3) +
+    geom_errorbar(
+      aes(ymin = lfc_val - se_val, ymax = lfc_val + se_val),
+      width = 0.2, color = "black", size = 0.4
+    ) +
+    coord_flip() +
+    theme_bw() +
+    scale_fill_brewer(palette = "Set2") +
+    labs(
+      title = "Differential taxon abundance: IL-1α KO vs Control",
+      subtitle = "Significant families (Holm-adjusted p < 0.05)",
+      x = "Bacterial family",
+      y = "Log fold change (LFC)",
+      fill = "Phylum"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      axis.text.y = element_text(face = "italic", size = 10),
+      axis.title = element_text(size = 12),
+      legend.position = "right",
+      panel.grid.major.y = element_blank()
+    )
+
+  print(p)
+  ggsave("Barplot_ANCOM_Family_Level.png", p, width = 10, height = 8, dpi = 600)
+
+} else {
+  print("Warning: No significant taxa detected after filtering.")
+}
