@@ -1,0 +1,195 @@
+# Differential abundance analysis using ANCOM-BC
+# Taxonomic level: Genus
+
+R
+library(ANCOMBC)
+library(phyloseq)
+library(writexl)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(circlize)
+
+#load environment containing variables from dada2 and phyloseq 
+load("R_environment_with_dada2_results.RData")
+
+# Genus level analysis
+# ============================================================
+
+# Run ANCOM-BC
+out_genus = ancombc(
+  data = ps,
+  tax_level = "Genus",
+  formula = "group",
+  group = "group"
+)
+
+res_genus = out_genus$res
+
+# Export results
+tab_lfc_genus = res_genus$lfc
+colnames(tab_lfc_genus) = col_name
+write_xlsx(tab_lfc_genus, "Resultados_ANCOM_LFC_Genus.xlsx")
+
+tab_se_genus = res_genus$se
+colnames(tab_se_genus) = col_name
+write_xlsx(tab_se_genus, "Resultados_ANCOM_SE_Genus.xlsx")
+
+tab_w_genus = res_genus$W
+colnames(tab_w_genus) = col_name
+write_xlsx(tab_w_genus, "Resultados_ANCOM_w_Test_Statistics_Genus.xlsx")
+
+tab_p_genus = res_genus$p_val
+colnames(tab_p_genus) = col_name
+write_xlsx(tab_p_genus, "Resultados_ANCOM_p_values_Genus.xlsx")
+
+tab_q_genus = res_genus$q
+colnames(tab_q_genus) = col_name
+write_xlsx(tab_q_genus, "Resultados_ANCOM_q_values_Genus.xlsx")
+
+tab_diff_genus = res_genus$diff_abn
+colnames(tab_diff_genus) = col_name
+write_xlsx(tab_diff_genus, "Resultados_ANCOM_diff_tax_Genus.xlsx")
+
+# -------------------------
+# Volcano plot: Genus level
+# -------------------------
+
+# Extract taxonomy from phyloseq
+tax_ref = as.data.frame(tax_table(ps)) %>%
+  select(Phylum, Genus) %>%
+  distinct() %>%
+  mutate(
+    Genus_Clean = str_trim(str_remove(Genus, ".*g__")),
+    Phylum = str_replace_na(str_remove(Phylum, ".*p__"), "Unclassified")
+  )
+
+# Prepare volcano data
+df_volcano = tab_lfc_genus %>%
+  select(Taxon, lfc = KO_Il1a) %>%
+  inner_join(tab_q_genus %>% select(Taxon, q_val = KO_Il1a), by = "Taxon") %>%
+  mutate(
+    q_val = ifelse(q_val == 0, 1e-300, q_val),
+    log_q = -log10(q_val),
+    Genus_Clean = str_trim(str_remove(Taxon, ".*[Gg]enus:|.*g__"))
+  )
+
+# Join taxonomy
+df_volcano_final = df_volcano %>%
+  left_join(tax_ref, by = "Genus_Clean") %>%
+  mutate(Phylum = ifelse(is.na(Phylum), "Other", Phylum))
+
+# Labeling and significance
+df_volcano_final = df_volcano_final %>%
+  mutate(
+    Label_Name = ifelse(log_q > 25 & q_val < 0.05, Genus_Clean, NA),
+    Is_Sig = ifelse(q_val < 0.05, "Significant", "NS")
+  )
+
+# Plot
+p_volcano = ggplot(df_volcano_final, aes(x = lfc, y = log_q, color = Phylum)) +
+  geom_point(aes(alpha = Is_Sig), size = 3) +
+  scale_alpha_manual(values = c("Significant" = 0.85, "NS" = 0.2)) +
+  scale_color_brewer(palette = "Paired") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, color = "black", alpha = 0.3) +
+  geom_text_repel(
+    aes(label = Label_Name),
+    size = 3.5,
+    fontface = "italic",
+    box.padding = 0.6,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  theme_bw() +
+  labs(
+    title = "Volcano plot: differential genus abundance",
+    subtitle = "Colored by phylum (phyloseq taxonomy)",
+    x = "Log fold change (LFC)",
+    y = "-log10 (adjusted p-value)",
+    color = "Phylum"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
+
+print(p_volcano)
+ggsave("Volcano_Plot_Genus_Phyloseq_Colors.png", p_volcano, width = 11, height = 8, dpi = 600)
+
+# Generating heatmap of genus-level abundance (ANCOM-BC bias-corrected)
+
+# --- SAMPLE METADATA FOR ANNOTATION ---
+anno_col = as.data.frame(sample_data(ps))
+
+# Ensure grouping column is named 'Group'
+# colnames(anno_col)[colnames(anno_col) == "condition"] <- "Group"
+
+# --- 1. BIAS-CORRECTED ABUNDANCE CALCULATION ---
+samp_frac = out_genus$samp_frac
+samp_frac[is.na(samp_frac)] = 0
+
+log_obs_abn = log(out_genus$feature_table + 1)
+log_corr_abn = t(t(log_obs_abn) - samp_frac)
+
+# --- 2. FILTER SAMPLES AND GROUPS ---
+samples_to_keep = rownames(anno_col)[
+  anno_col$Group %in% c("controle", "knockout-IL1a")
+]
+
+anno_col_filt = anno_col[samples_to_keep, , drop = FALSE]
+
+anno_col_filt$Group_Labels = factor(
+  anno_col_filt$Group,
+  levels = c("controle", "knockout-IL1a"),
+  labels = c("Control", "IL1\u03b1 -/-")
+)
+
+# --- 3. FILTER SIGNIFICANT GENERA ---
+sig_taxa_clean = df_volcano_final %>%
+  filter(q_val < 0.05) %>%
+  filter(!str_detect(Taxon, "^Phylum:|^Class:|^Order:|^Family:|^f__")) %>%
+  pull(Taxon)
+
+mat_final = log_corr_abn[sig_taxa_clean, samples_to_keep]
+
+rownames(mat_final) = rownames(mat_final) %>%
+  str_remove(".*[Gg]enus:") %>%
+  str_remove(".*g__") %>%
+  str_trim()
+
+# --- 4. HEATMAP CONFIGURATION ---
+col_fun = colorRamp2(
+  c(min(mat_final), 0, max(mat_final)),
+  c("blue", "white", "red")
+)
+
+h_final = Heatmap(
+  mat_final,
+  name = "Log Corr.\nAbundance",
+  col = col_fun,
+
+  cluster_rows = TRUE,
+  show_row_dend = FALSE,
+  row_names_gp = gpar(fontitalic = TRUE, fontsize = 9),
+
+  cluster_columns = FALSE,
+  show_column_names = FALSE,
+  column_split = anno_col_filt$Group_Labels,
+  column_title_gp = gpar(fontsize = 12, fontface = "bold"),
+
+  heatmap_legend_param = list(
+    title_gp = gpar(fontsize = 10, fontface = "bold")
+  )
+)
+
+# --- 5. EXPORT FIGURES ---
+cairo_pdf("Heatmap_IL1a_Genera.pdf", width = 8, height = 10)
+draw(h_final)
+dev.off()
+
+png("Heatmap_IL1a_Genera.png", width = 1000, height = 1200, res = 150)
+draw(h_final)
+dev.off()
