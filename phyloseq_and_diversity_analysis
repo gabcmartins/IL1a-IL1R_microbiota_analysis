@@ -7,7 +7,7 @@ library(pairwiseAdonis)
 
 
 # Load DADA2 results
-load("R_enviroment_with_dada2_results")
+load("R_enviroment_with_dada2_results.RData")
 
 # Load metadata
 samdf <- read.csv(
@@ -129,3 +129,6 @@ pairwise.adonis(
   perm = 9999,
   p.adjust.m = "BH"
 )
+
+# Save environment for downstream analysis
+save.image("R_environment_with_dada2_results.RData")
